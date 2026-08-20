@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-# Author: Umesh Panwar
-# Date: June 20, 2024
-# Description: Recreate Azure VMs and their managed disks in another availability zone.
+"""Recreate Azure VMs and their managed disks in another availability zone."""
 
 import argparse
 import csv
