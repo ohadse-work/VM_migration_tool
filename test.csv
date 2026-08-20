@@ -1,0 +1,2 @@
+Source VM Name,Source RG,OS Type,Target RG,Target Zone,Target VM Size
+app-vm-01,source-rg,Linux,target-rg,2,Standard_D2s_v5
