@@ -11,10 +11,14 @@ import sys
 
 
 class AzureCliError(RuntimeError):
+    """Represent a failure reported by an Azure CLI command."""
+
     pass
 
 
 def run_az(*arguments):
+    """Run an Azure CLI command and return its parsed JSON response."""
+
     command = ["az", *map(str, arguments), "--only-show-errors", "--output", "json"]
     logging.debug("Running Azure CLI command: %s", " ".join(command))
     result = subprocess.run(command, capture_output=True, text=True, check=False)
@@ -32,6 +36,8 @@ def run_az(*arguments):
 
 
 def capture_subnet(vnet_resource_group, vnet_name, subnet_name):
+    """Return the selected subnet resource ID and its VNet location."""
+
     vnet = run_az(
         "network",
         "vnet",
@@ -58,6 +64,8 @@ def capture_subnet(vnet_resource_group, vnet_name, subnet_name):
 
 
 def get_managed_disk_id(disk):
+    """Return a VM disk's managed resource ID or reject unmanaged disks."""
+
     disk_id = disk.get("managedDisk", {}).get("id")
     if not disk_id:
         raise ValueError(f"Disk {disk.get('name', '<unknown>')} is not a managed disk")
@@ -65,6 +73,8 @@ def get_managed_disk_id(disk):
 
 
 def validate_source_vm_state(resource_group, vm_name):
+    """Verify that the source VM is deallocated before disk snapshots are taken."""
+
     instance_view = run_az(
         "vm",
         "get-instance-view",
@@ -90,6 +100,8 @@ def validate_source_vm_state(resource_group, vm_name):
 
 
 def create_snapshot(resource_group, location, disk, snapshot_suffix):
+    """Create a zone-redundant snapshot of a managed source disk."""
+
     snapshot_name = f"{disk['name']}-{snapshot_suffix}"
     snapshot = run_az(
         "snapshot",
@@ -112,6 +124,8 @@ def create_snapshot(resource_group, location, disk, snapshot_suffix):
 def create_disk_from_snapshot(
     target_resource_group, location, zone, source_disk, snapshot_id
 ):
+    """Create a zonal managed disk from a snapshot using the source disk SKU."""
+
     source_disk_details = run_az("disk", "show", "--ids", get_managed_disk_id(source_disk))
     source_sku = source_disk_details.get("sku", {}).get("name")
     if not source_sku:
@@ -139,6 +153,8 @@ def create_disk_from_snapshot(
 
 
 def attach_data_disks(target_resource_group, target_vm_name, data_disks):
+    """Attach recreated data disks while preserving LUN and disk settings."""
+
     for source_disk, target_disk_id in sorted(data_disks, key=lambda item: item[0]["lun"]):
         arguments = [
             "vm",
@@ -168,6 +184,8 @@ def attach_data_disks(target_resource_group, target_vm_name, data_disks):
 
 
 def migrate_vm(row, subnet_id, subnet_location):
+    """Validate and recreate one CSV-defined VM in its requested availability zone."""
+
     vm_name, resource_group, csv_os_type, target_resource_group, zone_text, vm_sku = row
     try:
         zone = int(zone_text)
@@ -241,6 +259,8 @@ def migrate_vm(row, subnet_id, subnet_location):
 
 
 def read_csv_rows(csv_file):
+    """Yield validated migration rows from a six-column CSV input file."""
+
     with csv_file.open(newline="", encoding="utf-8-sig") as file:
         reader = csv.reader(file)
         if next(reader, None) is None:
@@ -265,6 +285,8 @@ def read_csv_rows(csv_file):
 
 
 def parse_arguments():
+    """Parse command-line options for the migration run."""
+
     parser = argparse.ArgumentParser(
         description="Recreate Azure VMs and their managed disks in another availability zone."
     )
@@ -281,6 +303,8 @@ def parse_arguments():
 
 
 def configure_logging(log_file):
+    """Configure migration logging for both the selected file and the console."""
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
@@ -289,6 +313,8 @@ def configure_logging(log_file):
 
 
 def main():
+    """Run all CSV migrations and return a process exit code."""
+
     arguments = parse_arguments()
     configure_logging(arguments.log_file)
 
