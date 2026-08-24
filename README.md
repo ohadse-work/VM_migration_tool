@@ -4,10 +4,12 @@ This Python tool recreates Azure virtual machines in another availability zone b
 
 1. Taking `Standard_ZRS` snapshots of the source VM's managed OS and data disks.
 2. Creating zonal managed disks from those snapshots in the target resource group.
-3. Creating a VM from the new OS disk in the requested zone and subnet.
-4. Attaching the new data disks with their original LUN, caching policy, and write accelerator setting.
+3. Deploying a new NIC and VM in the requested zone and subnet.
+4. Including every new data disk in the VM's initial storage profile with its original LUN, caching policy, and write accelerator setting.
 
 The source VM and its disks are not deleted or modified. The source VM must be deallocated before the tool runs.
+
+The target VM does not boot before its data disks are attached. This prevents a Windows Storage Spaces pool from being discovered with missing members during the first startup.
 
 ## Prerequisites
 
@@ -96,6 +98,29 @@ For a source VM named `app-vm-01` targeting zone `2`, the tool uses these names:
 
 The new VM receives a new NIC in the selected subnet and no public IP address. Progress is written to the console and to `snapshot.log` by default.
 
+## Windows Storage Spaces
+
+For a standalone Windows Storage Spaces pool, all pool members must be managed data disks attached to the source VM. Pool metadata is copied with each disk, and the target VM receives all copied members in its initial storage profile at their original LUNs.
+
+After migration, run the following commands in an elevated PowerShell session before placing the target VM into service:
+
+```powershell
+Update-HostStorageCache
+
+Get-PhysicalDisk |
+  Format-Table FriendlyName, UniqueId, PhysicalLocation, HealthStatus, OperationalStatus, CannotPoolReason
+
+Get-StoragePool -IsPrimordial $false |
+  Format-Table FriendlyName, HealthStatus, OperationalStatus, IsReadOnly, ReadOnlyReason
+
+Get-VirtualDisk |
+  Format-Table FriendlyName, HealthStatus, OperationalStatus, DetachedReason, IsManualAttach
+
+Get-Volume
+```
+
+Do not initialize, format, clear, or reset the copied data disks. Storage Spaces Direct and clustered storage require a separate cluster-aware migration process.
+
 ## Validation and Failure Behavior
 
 Before creating resources for each row, the tool verifies that:
@@ -112,6 +137,8 @@ The tool stops at the first error and returns a nonzero exit code. It does not r
 ## Limitations
 
 This is a disk-based VM reconstruction workflow, not a full-fidelity VM configuration migration. It does not copy the source VM's existing NIC, private IP, NSG associations, public IP, managed identity, extensions, tags, boot diagnostics, marketplace plan, availability set, proximity placement group, or security profile.
+
+The migration only includes managed OS and data disks. Azure temporary or resource disks are not copied and must not be members of a Windows Storage Spaces pool that is migrated with this tool.
 
 Review and reapply any required networking, identity, security, monitoring, backup, and extension configuration before placing the new VM into service. Validate the process on a disposable VM before using it for production workloads.
 

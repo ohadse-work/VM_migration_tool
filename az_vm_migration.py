@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 
 class AzureCliError(RuntimeError):
@@ -152,35 +153,143 @@ def create_disk_from_snapshot(
     return target_disk["id"]
 
 
-def attach_data_disks(target_resource_group, target_vm_name, data_disks):
-    """Attach recreated data disks while preserving LUN and disk settings."""
+def build_vm_template(
+    target_vm_name,
+    location,
+    zone,
+    subnet_id,
+    vm_sku,
+    os_type,
+    source_os_disk,
+    target_os_disk_id,
+    data_disks,
+):
+    """Build an ARM template that attaches every disk before the first VM boot."""
 
-    for source_disk, target_disk_id in sorted(data_disks, key=lambda item: item[0]["lun"]):
-        arguments = [
-            "vm",
-            "disk",
-            "attach",
+    nic_name = f"{target_vm_name}-nic"
+    target_data_disks = [
+        {
+            "lun": source_disk["lun"],
+            "name": target_disk_id.rsplit("/", 1)[-1],
+            "createOption": "Attach",
+            "caching": source_disk.get("caching") or "None",
+            "writeAcceleratorEnabled": bool(
+                source_disk.get("writeAcceleratorEnabled")
+            ),
+            "deleteOption": "Detach",
+            "managedDisk": {"id": target_disk_id},
+        }
+        for source_disk, target_disk_id in sorted(
+            data_disks, key=lambda item: item[0]["lun"]
+        )
+    ]
+    return {
+        "$schema": (
+            "https://schema.management.azure.com/schemas/2019-04-01/"
+            "deploymentTemplate.json#"
+        ),
+        "contentVersion": "1.0.0.0",
+        "resources": [
+            {
+                "type": "Microsoft.Network/networkInterfaces",
+                "apiVersion": "2024-05-01",
+                "name": nic_name,
+                "location": location,
+                "properties": {
+                    "ipConfigurations": [
+                        {
+                            "name": "ipconfig1",
+                            "properties": {
+                                "privateIPAllocationMethod": "Dynamic",
+                                "subnet": {"id": subnet_id},
+                            },
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "Microsoft.Compute/virtualMachines",
+                "apiVersion": "2024-11-01",
+                "name": target_vm_name,
+                "location": location,
+                "zones": [str(zone)],
+                "dependsOn": [
+                    f"[resourceId('Microsoft.Network/networkInterfaces', '{nic_name}')]"
+                ],
+                "properties": {
+                    "hardwareProfile": {"vmSize": vm_sku},
+                    "storageProfile": {
+                        "osDisk": {
+                            "osType": os_type,
+                            "name": target_os_disk_id.rsplit("/", 1)[-1],
+                            "createOption": "Attach",
+                            "caching": source_os_disk.get("caching") or "ReadWrite",
+                            "deleteOption": "Detach",
+                            "managedDisk": {"id": target_os_disk_id},
+                        },
+                        "dataDisks": target_data_disks,
+                    },
+                    "networkProfile": {
+                        "networkInterfaces": [
+                            {
+                                "id": (
+                                    "[resourceId('Microsoft.Network/"
+                                    f"networkInterfaces', '{nic_name}')]"
+                                ),
+                                "properties": {
+                                    "primary": True,
+                                    "deleteOption": "Detach",
+                                },
+                            }
+                        ]
+                    },
+                },
+            },
+        ],
+    }
+
+
+def create_vm_with_disks(
+    target_resource_group,
+    target_vm_name,
+    location,
+    zone,
+    subnet_id,
+    vm_sku,
+    os_type,
+    source_os_disk,
+    target_os_disk_id,
+    data_disks,
+):
+    """Deploy the target NIC and complete VM storage profile in one operation."""
+
+    template = build_vm_template(
+        target_vm_name,
+        location,
+        zone,
+        subnet_id,
+        vm_sku,
+        os_type,
+        source_os_disk,
+        target_os_disk_id,
+        data_disks,
+    )
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        template_file = Path(temporary_directory) / "vm-template.json"
+        template_file.write_text(json.dumps(template), encoding="utf-8")
+        run_az(
+            "deployment",
+            "group",
+            "create",
             "--resource-group",
             target_resource_group,
-            "--vm-name",
-            target_vm_name,
-            "--ids",
-            target_disk_id,
-            "--lun",
-            source_disk["lun"],
-            "--caching",
-            source_disk.get("caching") or "None",
-        ]
-        if source_disk.get("writeAcceleratorEnabled"):
-            arguments.extend(["--enable-write-accelerator", "true"])
-
-        run_az(*arguments)
-        logging.info(
-            "Attached disk %s to %s at LUN %s",
-            source_disk["name"],
-            target_vm_name,
-            source_disk["lun"],
+            "--name",
+            f"migrate-{target_vm_name}",
+            "--template-file",
+            template_file,
         )
+
+    logging.info("Created VM %s with all data disks attached", target_vm_name)
 
 
 def migrate_vm(row, subnet_id, subnet_location):
@@ -232,30 +341,18 @@ def migrate_vm(row, subnet_id, subnet_location):
         target_data_disks.append((data_disk, target_disk_id))
 
     target_vm_name = f"{vm_name}-zone{zone}"
-    run_az(
-        "vm",
-        "create",
-        "--resource-group",
+    create_vm_with_disks(
         target_resource_group,
-        "--location",
-        location,
-        "--name",
         target_vm_name,
-        "--attach-os-disk",
-        target_os_disk_id,
-        "--os-type",
-        os_type,
-        "--zone",
+        location,
         zone,
-        "--subnet",
         subnet_id,
-        "--size",
         vm_sku,
-        "--public-ip-address",
-        "",
+        os_type,
+        os_disk,
+        target_os_disk_id,
+        target_data_disks,
     )
-    logging.info("Created VM %s", target_vm_name)
-    attach_data_disks(target_resource_group, target_vm_name, target_data_disks)
 
 
 def read_csv_rows(csv_file):
